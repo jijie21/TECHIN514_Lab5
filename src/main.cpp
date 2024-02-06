@@ -1,106 +1,153 @@
-/*
-  Rui Santos
-  Complete project details at our blog.
-    - ESP32: https://RandomNerdTutorials.com/esp32-firebase-realtime-database/
-    - ESP8266: https://RandomNerdTutorials.com/esp8266-nodemcu-firebase-realtime-database/
-  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files.
-  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-  Based in the RTDB Basic Example by Firebase-ESP-Client library by mobizt
-  https://github.com/mobizt/Firebase-ESP-Client/blob/main/examples/RTDB/Basic/Basic.ino
-*/
-
 #include <Arduino.h>
-#if defined(ESP32)
-  #include <WiFi.h>
-#elif defined(ESP8266)
-  #include <ESP8266WiFi.h>
-#endif
+#include <WiFi.h>
 #include <Firebase_ESP_Client.h>
 
-//Provide the token generation process info.
 #include "addons/TokenHelper.h"
-//Provide the RTDB payload printing info and other helper functions.
 #include "addons/RTDBHelper.h"
 
-// Insert your network credentials
-#define WIFI_SSID "UW MPSK"
-#define WIFI_PASSWORD "n3<<K.Pprc"
+const char* ssid = "UW MPSK";
+const char* password = "n3<<K.Pprc";
+#define DATABASE_URL "https://techin510-lab-project-v2-default-rtdb.firebaseio.com/" // Replace with your database URL
+#define API_KEY "AIzaSyC8BLcKXQhq1XA_wfhOwIDY-02Ujx06wlQ"
+#define DEEP_SLEEP_DURATION 10e6 // 10 seconds in microseconds
+#define MAX_WIFI_RETRIES 5 // Maximum number of WiFi connection retries
 
-// Insert Firebase project API Key
-#define API_KEY "AIzaSyCrXHxCIaRx0m6SZYBVXIaSP3TS0hOJdiA"
+#define SLEEP_DURATION 10000  // 10 seconds in deep sleep
+#define DISTANCE_THRESHOLD 30  // Distance threshold for sleep mode in centimeters
 
-// Insert RTDB URLefine the RTDB URL */
-#define DATABASE_URL "https://techin514-lab5-default-rtdb.firebaseio.com/" 
+int uploadInterval = 1000; // 1 second upload interval
 
-//Define Firebase Data object
+// Define Firebase Data object
 FirebaseData fbdo;
 
 FirebaseAuth auth;
 FirebaseConfig config;
 
 unsigned long sendDataPrevMillis = 0;
-int count = 0;
 bool signupOK = false;
+bool deepSleepConfigured = false;  // Flag to track whether deep sleep is configured
 
-void setup(){
+// HC-SR04 Pins
+const int trigPin = 2;
+const int echoPin = 3;
+
+const float soundSpeed = 0.034;
+
+// Function prototypes
+float measureDistance();
+void connectToWiFi();
+void initFirebase();
+void sendDataToFirebase(float distance);
+
+void setup() {
   Serial.begin(115200);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED){
-    Serial.print(".");
-    delay(300);
-  }
-  Serial.println();
-  Serial.print("Connected with IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.println();
 
-  /* Assign the api key (required) */
-  config.api_key = API_KEY;
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
 
-  /* Assign the RTDB URL (required) */
-  config.database_url = DATABASE_URL;
+  // Initial delay for stability
+  delay(500);
 
-  /* Sign up */
-  if (Firebase.signUp(&config, &auth, "", "")){
-    Serial.println("ok");
-    signupOK = true;
-  }
-  else{
-    Serial.printf("%s\n", config.signer.signupError.message.c_str());
+  // Measure distance and determine whether to enter sleep mode
+  float currentDistance = measureDistance();
+  if (currentDistance > DISTANCE_THRESHOLD) {
+    Serial.println("Entering deep sleep mode...");
+    esp_sleep_enable_timer_wakeup(SLEEP_DURATION * 1000); // in microseconds
+    deepSleepConfigured = true;
+    esp_deep_sleep_start();
   }
 
-  /* Assign the callback function for the long running token generation task */
-  config.token_status_callback = tokenStatusCallback; //see addons/TokenHelper.h
-  
-  Firebase.begin(&config, &auth);
-  Firebase.reconnectWiFi(true);
+  // Initialize WiFi
+  connectToWiFi();
+
+  // Initialize Firebase
+  initFirebase();
 }
 
-void loop(){
-  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 15000 || sendDataPrevMillis == 0)){
+void loop() {
+  // Measure distance
+  float currentDistance = measureDistance();
+
+  // If distance is greater than threshold and deep sleep is not configured, enter sleep mode
+  if (currentDistance > DISTANCE_THRESHOLD && !deepSleepConfigured) {
+    Serial.println("Entering deep sleep mode...");
+    esp_sleep_enable_timer_wakeup(SLEEP_DURATION * 1000); // in microseconds
+    deepSleepConfigured = true;
+    esp_deep_sleep_start();
+  }
+
+  // Send data to Firebase
+  sendDataToFirebase(currentDistance);
+
+  // Delay before next iteration
+  delay(uploadInterval);
+}
+
+float measureDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH);
+  float distance = duration * soundSpeed / 2;
+
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+  return distance;
+}
+
+void connectToWiFi() {
+  Serial.println(WiFi.macAddress());
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting to WiFi");
+  int wifiCnt = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+    wifiCnt++;
+    if (wifiCnt > MAX_WIFI_RETRIES) {
+      Serial.println("WiFi connection failed");
+      ESP.restart();
+    }
+  }
+  Serial.println("Connected to WiFi");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void initFirebase() {
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase sign up successful");
+    signupOK = true;
+  } else {
+    Serial.printf("Firebase sign up failed: %s\n", config.signer.signupError.message.c_str());
+  }
+
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectNetwork(true);
+}
+
+void sendDataToFirebase(float distance) {
+  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > uploadInterval || sendDataPrevMillis == 0)) {
     sendDataPrevMillis = millis();
-    // Write an Int number on the database path test/int
-    if (Firebase.RTDB.setInt(&fbdo, "test/int", count)){
-      Serial.println("PASSED");
-      Serial.println("PATH: " + fbdo.dataPath());
-      Serial.println("TYPE: " + fbdo.dataType());
-    }
-    else {
-      Serial.println("FAILED");
-      Serial.println("REASON: " + fbdo.errorReason());
-    }
-    count++;
-    
-    // Write an Float number on the database path test/float
-    if (Firebase.RTDB.setFloat(&fbdo, "test/float", 0.01 + random(0,100))){
-      Serial.println("PASSED");
-      Serial.println("PATH: " + fbdo.dataPath());
-      Serial.println("TYPE: " + fbdo.dataType());
-    }
-    else {
-      Serial.println("FAILED");
-      Serial.println("REASON: " + fbdo.errorReason());
+
+    if (Firebase.RTDB.pushFloat(&fbdo, "test/distance", distance)) {
+      Serial.println("Data sent to Firebase");
+      Serial.print("Path: ");
+      Serial.println(fbdo.dataPath());
+      Serial.print("Type: ");
+      Serial.println(fbdo.dataType());
+    } else {
+      Serial.println("Failed to send data to Firebase");
+      Serial.print("Reason: ");
+      Serial.println(fbdo.errorReason());
     }
   }
 }
